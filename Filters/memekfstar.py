@@ -1,5 +1,6 @@
 import numpy as np
 from numpy.random import multivariate_normal as mvn
+from scipy.linalg import block_diag
 
 from matplotlib.patches import Ellipse
 
@@ -11,7 +12,7 @@ from constants import *
 class MemEkfStarTracker(ExtendedObjectFilter):
     """
     MEM-EKF* filter.
-    Author: Shishan Yang
+    Modified for paper, original code author: Shishan Yang
     Based on:
     Tracking the Orientation and Axes Lengths of an Elliptical Extended Object
     S. Yang and M. Baum
@@ -19,6 +20,7 @@ class MemEkfStarTracker(ExtendedObjectFilter):
     """
     def __init__(self, h_matrix, dynamic_matrix_kin, dynamic_matrix_extent, measurement_noise_cov, **kwargs):
         super().__init__(**kwargs)
+        init_cov = kwargs.get('init_cov').copy()
         self.error = []
         self.name = 'MEM-EKF*'
         # parameters
@@ -29,9 +31,30 @@ class MemEkfStarTracker(ExtendedObjectFilter):
         self.process_noise_cov_kin = kwargs.get('Q')
         self.process_noise_cov_extent = kwargs.get('SH')
         self.multiplicative_noise_cov = np.diag([.25, .25])
+
+        self._last_m = np.eye(3)
+
+        # introduce ambiguity
+        if SIMULATE_AMBIGUITY & (measurement_noise_cov[1, 1] > measurement_noise_cov[0, 0]):
+            save_l = self._est[L]
+            self._est[L] = self._est[W]
+            self._est[W] = save_l
+            self._est[AL] += 0.5 * np.pi
+            save_cov_l = init_cov[L].copy()
+            init_cov[L] = init_cov[W].copy()
+            init_cov[W] = save_cov_l.copy()
+            save_cov_l = init_cov[:, L].copy()
+            init_cov[:, L] = init_cov[:, W].copy()
+            init_cov[:, W] = save_cov_l.copy()
+
+            self._ambiguity = True
+        else:
+            self._ambiguity = False
+
         self.mem_est = MemEstimate(self._est[[X1, X2]], self._est[AL], self._est[[L, W]],
-                                   kwargs.get('init_cov')[:4, :4], kwargs.get('init_cov')[4:, 4:],
+                                   init_cov[:4, :4], init_cov[4:, 4:],
                                    velocity=self._est[[V1, V2]], color=self._color)
+        self._est_cov = init_cov.copy()
         self._al_approx = kwargs.get('al_approx')  # approximate shape orientation via velocity vector
 
         self._mmgw = kwargs.get('mmgw')
@@ -51,8 +74,33 @@ class MemEkfStarTracker(ExtendedObjectFilter):
 
     def reset(self, init_est, init_cov):
         self._est = init_est.copy()
-        self.mem_est = MemEstimate(init_est[[X1, X2]], init_est[AL], init_est[[L, W]], init_cov[:4, :4],
-                                   init_cov[4:, 4:], velocity=init_est[[V1, V2]], color=self.mem_est.color)
+        self._est_cov = init_cov.copy()
+
+        # introduce ambiguity
+        if self._ambiguity:
+            init_cov_mod = init_cov.copy()
+            save_l = self._est[L]
+            self._est[L] = self._est[W]
+            self._est[W] = save_l
+            self._est[AL] += 0.5 * np.pi
+            save_cov_l = init_cov_mod[L].copy()
+            init_cov_mod[L] = init_cov_mod[W].copy()
+            init_cov_mod[W] = save_cov_l.copy()
+            save_cov_l = init_cov_mod[:, L].copy()
+            init_cov_mod[:, L] = init_cov_mod[:, W].copy()
+            init_cov_mod[:, W] = save_cov_l.copy()
+            self._est_cov = init_cov_mod
+
+            self.mem_est = MemEstimate(init_est[[X1, X2]].copy(), init_est[AL] + 0.5*np.pi, init_est[[W, L]].copy(),
+                                       init_cov_mod[:4, :4], init_cov_mod[4:, 4:], velocity=init_est[[V1, V2]].copy(),
+                                       color=self.mem_est.color)
+        else:
+            self.mem_est = MemEstimate(init_est[[X1, X2]].copy(), init_est[AL], init_est[[L, W]].copy(),
+                                       init_cov[:4, :4].copy(), init_cov[4:, 4:].copy(),
+                                       velocity=init_est[[V1, V2]].copy(), color=self.mem_est.color)
+
+    def get_est(self):
+        return self._est, self._est_cov, self._last_m
 
     def get_aux_variables(self, esti):
         """
@@ -149,17 +197,23 @@ class MemEkfStarTracker(ExtendedObjectFilter):
             esti = MemEstimate(center, orientation, semi_axes_length, cov_r, cov_p,
                                velocity=kin_esti[2:4, 0].tolist(), color=self.mem_est.color)
 
-        center = ((self.h_matrix @ kin_esti)[:, 0]).tolist()
+            if i == (len(measurements)-1):
+                self._last_m = m_matrix.copy()
 
-        orientation, *semi_axes_length = extent_esti[:, 0]
-        if self._al_approx:
-            orientation = np.arctan2(kin_esti[3, 0], kin_esti[2, 0])
+        if len(measurements) > 0:
+            center = ((self.h_matrix @ kin_esti)[:, 0]).tolist()
 
-        updated_estimate = MemEstimate(center, orientation, semi_axes_length, cov_r, cov_p,
-                                       velocity=kin_esti[2:4, 0].tolist(), color=self.mem_est.color)
+            orientation, *semi_axes_length = extent_esti[:, 0]
+            if self._al_approx:
+                orientation = np.arctan2(kin_esti[3, 0], kin_esti[2, 0])
 
-        self.mem_est = updated_estimate
+            updated_estimate = MemEstimate(center, orientation, semi_axes_length, cov_r, cov_p,
+                                           velocity=kin_esti[2:4, 0].tolist(), color=self.mem_est.color)
+
+            self.mem_est = updated_estimate
+
         self._est = self.mem_est.get_estimate(self._mmgw)
+        self._est_cov = self.mem_est.get_estimate_covariance()
 
     def predict(self, td):
         """
@@ -176,8 +230,9 @@ class MemEkfStarTracker(ExtendedObjectFilter):
         # get process noise
         proc_noise = get_proc_cov(self.process_noise_cov_kin, self.process_noise_cov_extent, td)
 
-        kin_esti = self.dynamic_matrix_kin @ kin_esti
-        cov_r = self.dynamic_matrix_kin @ cov_r @ self.dynamic_matrix_kin.T + proc_noise[:4, :4]
+        if not NO_KIN:
+            kin_esti = self.dynamic_matrix_kin @ kin_esti
+            cov_r = self.dynamic_matrix_kin @ cov_r @ self.dynamic_matrix_kin.T + proc_noise[:4, :4]
 
         extent_esti = self.dynamic_matrix_extent @ extent_esti
         cov_p = self.dynamic_matrix_extent @ cov_p @ self.dynamic_matrix_extent.T + proc_noise[4:, 4:]
@@ -199,7 +254,7 @@ class ExtendedObject:
         '''
         center could be a list or tuple
         semi_axes_length is a list
-        orientation is in raidan (float)
+        orientation is in radian (float)
         '''
         self.center = center
         self.kinematics = self.center
@@ -253,6 +308,9 @@ class MemEstimate(ExtendedObject):
 
     def __str__(self):
         pass
+
+    def get_estimate_covariance(self):
+        return block_diag(self.covariance_kin, self.covariance_extent)
 
     def get_estimate(self, mmgw=False):
         """

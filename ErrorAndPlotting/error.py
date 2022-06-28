@@ -1,7 +1,8 @@
 import numpy as np
 from scipy.linalg import sqrtm
+from shapely.geometry import Polygon
 
-from Data.simulation import rot
+from Filters.filtersupport import rot
 from constants import *
 
 
@@ -24,7 +25,7 @@ def gw_error(x, gt):
     Calculates the squared Gaussian Wasserstein metric for two ellipses.
     :param x:   first ellipse, must be parameterized with center, orientation, and semi-axes
     :param gt:  second ellipse, must be parameterized with center, orientation, and semi-axes
-    :return:    the Gaussian Wasserstein distance between the two ellipses
+    :return:    the squared Gaussian Wasserstein distance between the two ellipses
     """
     gt_sigma = to_matrix(gt[AL], gt[L], gt[W], False)
     gt_sigma += gt_sigma.T
@@ -39,3 +40,24 @@ def gw_error(x, gt):
                                                                     sqrtm(gt_sigma))))
 
     return error
+
+
+def iou_error(x, gt):
+    """
+    Calculates intersection-over-union between the two ellipses.
+    :param x:   first ellipse, must be parameterized with center, orientation, and semi-axes
+    :param gt:  second ellipse, must be parameterized with center, orientation, and semi-axes
+    :return:    the iou value between 0 and 1
+    """
+    # get points on ellipses
+    theta = np.linspace(0.0, 2.0*np.pi, 100)
+    x_points = x[[X1, X2], None] + rot(x[AL]) @ np.diag([x[L], x[W]]) @ np.array([np.cos(theta), np.sin(theta)])
+    gt_points = gt[[X1, X2], None] + rot(gt[AL]) @ np.diag([gt[L], gt[W]]) @ np.array([np.cos(theta), np.sin(theta)])
+
+    # create polygon
+    x_pol = Polygon(x_points.T)
+    gt_pol = Polygon(gt_points.T)
+
+    # calculate IoU
+    intersec = gt_pol.intersection(x_pol).area
+    return intersec / (gt_pol.area + x_pol.area - intersec)
