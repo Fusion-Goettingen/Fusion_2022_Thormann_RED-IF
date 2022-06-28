@@ -1,3 +1,5 @@
+import os
+
 import matplotlib.pyplot as plt
 import tikzplotlib
 
@@ -21,6 +23,16 @@ _, ax = plt.subplots(1, 1)
 init_state = mvn(INIT_STATE, INIT_STATE_COV)
 init_state[L] = np.max([init_state[L], AX_MIN])
 init_state[W] = np.max([init_state[W], AX_MIN])
+
+# create folders if necessary
+if not os.path.isdir('./simData'):
+    os.mkdir('./simData')
+if not os.path.isdir('./plots'):
+    os.mkdir('./plots')
+if not os.path.isdir('./plots/animation0'):
+    os.mkdir('./plots/animation0')
+if not os.path.isdir('./plots/animation1'):
+    os.mkdir('./plots/animation1')
 
 # for reproducibility
 if LOAD_DATA:
